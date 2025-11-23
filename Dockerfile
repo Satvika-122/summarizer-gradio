@@ -2,11 +2,17 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
+# Install system dependencies needed by pdfplumber
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libffi-dev \
+    libjpeg-dev \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir gradio \
-    && pip install --no-cache-dir transformers==4.28.1 \
-    && pip install --no-cache-dir torch==2.0.1+cpu -f https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
