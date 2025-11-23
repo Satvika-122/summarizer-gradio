@@ -1,6 +1,8 @@
-onnxruntime
-transformers
-tokenizers
-numpy
-gradio
-pdfplumber
+onnxruntime==1.17.1
+transformers==4.38.0
+tokenizers==0.19.1
+numpy==1.26.4
+gradio==4.38.1
+pdfplumber==0.11.0
+requests
+sentencepiece==0.2.0
