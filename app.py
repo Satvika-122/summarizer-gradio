@@ -1,22 +1,31 @@
 import gradio as gr
 import pdfplumber
-from transformers import pipeline
 import io
 import re
+import numpy as np
+import onnxruntime as ort
+from transformers import AutoTokenizer
 
-# ----------------------------------------------------------
-# LIGHTWEIGHT SUMMARIZER (GOOD FOR RENDER 512MB LIMIT)
-# ----------------------------------------------------------
-summarizer = pipeline(
-    "summarization",
-    model="sshleifer/distilbart-cnn-12-6",
-    tokenizer="sshleifer/distilbart-cnn-12-6",
-    device=-1
+# -------------------------------
+# LOAD ONNX MODELS FROM HF HUB
+# -------------------------------
+MODEL_REPO = "Satvi/distilbart-onnx"
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO)
+
+encoder_sess = ort.InferenceSession(
+    f"https://huggingface.co/{MODEL_REPO}/resolve/main/encoder.onnx",
+    providers=["CPUExecutionProvider"]
 )
 
-# ----------------------------------------------------------
+decoder_sess = ort.InferenceSession(
+    f"https://huggingface.co/{MODEL_REPO}/resolve/main/decoder.onnx",
+    providers=["CPUExecutionProvider"]
+)
+
+# -------------------------------
 # CLEAN TEXT
-# ----------------------------------------------------------
+# -------------------------------
 def clean_text(text):
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
     text = text.replace("�", "")
@@ -24,31 +33,29 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
-# ----------------------------------------------------------
-# EXTRACT TEXT FROM PDF / TXT (NO OCR)
-# ----------------------------------------------------------
+# -------------------------------
+# PDF / TXT EXTRACTION
+# -------------------------------
 def extract_text(file):
-    # File provided as string path
     if isinstance(file, str):
         filename = file
         with open(file, "rb") as f:
             file_bytes = f.read()
-    # Normal uploaded file object
+
     elif hasattr(file, "read"):
         filename = file.name
         file_bytes = file.read()
-    # Dict mode
+
     elif isinstance(file, dict):
         filename = file["name"]
         file_bytes = file["data"]
+
     else:
         return None
 
-    # TXT extraction
     if filename.endswith(".txt"):
         return file_bytes.decode("utf-8", errors="ignore")
 
-    # PDF extraction
     if filename.endswith(".pdf"):
         text = ""
         try:
@@ -64,73 +71,85 @@ def extract_text(file):
 
     return None
 
-# ----------------------------------------------------------
-# WORD LIMIT CONFIG
-# ----------------------------------------------------------
+# -------------------------------
+# WORD LIMITS
+# -------------------------------
 LENGTH_MAP = {
     "100 words": (120, 50),
     "250 words": (350, 200),
-    "500 words": (550, 350)
+    "500 words": (550, 350),
 }
 
-# ----------------------------------------------------------
-# MAIN SUMMARIZATION FUNCTION
-# ----------------------------------------------------------
+# -------------------------------
+# ONNX SUMMARIZER (token-by-token)
+# -------------------------------
+def onnx_summarize(text, max_len, min_len):
+    inputs = tokenizer(text, return_tensors="np")
+    input_ids = inputs["input_ids"]
+
+    encoder_out = encoder_sess.run(
+        ["last_hidden_state"],
+        {"input_ids": input_ids}
+    )[0]
+
+    decoder_input_ids = np.array([[tokenizer.bos_token_id]])
+
+    for _ in range(max_len):
+        out = decoder_sess.run(
+            ["hidden_states"],
+            {
+                "decoder_input_ids": decoder_input_ids,
+                "encoder_hidden_states": encoder_out
+            }
+        )[0]
+
+        next_token_logits = out[:, -1, :]
+        next_token_id = np.argmax(next_token_logits, axis=-1).reshape(1, 1)
+        decoder_input_ids = np.concatenate([decoder_input_ids, next_token_id], axis=1)
+
+        if next_token_id.item() == tokenizer.eos_token_id:
+            break
+
+    return tokenizer.decode(decoder_input_ids[0], skip_special_tokens=True)
+
+# -------------------------------
+# MAIN LOGIC (chunks + final pass)
+# -------------------------------
 def summarize_document(file, word_limit):
-    raw_text = extract_text(file)
+    raw = extract_text(file)
+    if not raw:
+        return "❌ Could not extract text. The PDF may be image-based."
 
-    if not raw_text or raw_text.strip() == "":
-        return "❌ Could not extract text. This PDF may be image-based."
-
-    raw_text = clean_text(raw_text)
+    raw = clean_text(raw)
 
     max_len, min_len = LENGTH_MAP[word_limit]
 
-    try:
-        # Chunking for model limits
-        chunks = [raw_text[i:i+900] for i in range(0, len(raw_text), 900)]
-        partial = []
+    chunks = [raw[i:i+900] for i in range(0, len(raw), 900)]
+    partial = []
 
-        for chunk in chunks:
-            summary = summarizer(
-                chunk,
-                max_length=min(max_len, 400),
-                min_length=min(min_len, 150),
-                do_sample=False
-            )
-            partial.append(summary[0]["summary_text"])
+    # First pass (chunk summaries)
+    for chunk in chunks:
+        summary = onnx_summarize(chunk, max_len=200, min_len=80)
+        partial.append(summary)
 
-        # Final combined summary
-        combined = " ".join(partial)
+    combined = " ".join(partial)
 
-        final = summarizer(
-            combined,
-            max_length=max_len,
-            min_length=min_len,
-            do_sample=False
-        )
+    # Second pass (final summary)
+    final = onnx_summarize(combined, max_len=max_len, min_len=min_len)
 
-        return final[0]["summary_text"]
+    return final
 
-    except Exception as e:
-        return f"❌ Summarization failed: {str(e)}"
-
-# ----------------------------------------------------------
+# -------------------------------
 # GRADIO UI
-# ----------------------------------------------------------
+# -------------------------------
 app = gr.Interface(
     fn=summarize_document,
     inputs=[
         gr.File(label="Upload PDF or TXT"),
-        gr.Dropdown(
-            ["100 words", "250 words", "500 words"],
-            value="250 words",
-            label="Select Summary Length"
-        )
+        gr.Dropdown(["100 words", "250 words", "500 words"], value="250 words"),
     ],
-    outputs=gr.Markdown(label="Summary Output (Full Text)"),
-    title="📄 Document Summarizer (Lightweight – No OCR)",
+    outputs=gr.Markdown(label="Summary Output"),
+    title="📄 ONNX Document Summarizer (Render-Friendly)",
 )
 
-# For Render deployment
 app.launch(server_name="0.0.0.0", server_port=7860)
