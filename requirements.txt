@@ -1,7 +1,4 @@
 gradio==4.12.0
 transformers==4.39.3
 torch==2.0.1+cpu
--f https://download.pytorch.org/whl/cpu/torch_stable.html
-pdfplumber
-pillow
-python-multipart
+
