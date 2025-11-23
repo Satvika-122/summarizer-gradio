@@ -1,0 +1,8 @@
+gradio
+pdfplumber
+easyocr
+pdf2image
+transformers
+torch
+pillow
+python-multipart
