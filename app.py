@@ -9,17 +9,48 @@ from transformers import AutoTokenizer
 # -------------------------------
 # LOAD ONNX MODELS FROM HF HUB
 # -------------------------------
+import os
+import requests
+
+# -------------------------------
+# DOWNLOAD ONNX FILES LOCALLY
+# -------------------------------
+
 MODEL_REPO = "Satvi/distilbart-onnx"
+HF_BASE = f"https://huggingface.co/{MODEL_REPO}/resolve/main"
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO)
+MODEL_DIR = "onnx_model"
+os.makedirs(MODEL_DIR, exist_ok=True)
 
+FILES = {
+    "encoder.onnx": f"{HF_BASE}/encoder.onnx",
+    "decoder.onnx": f"{HF_BASE}/decoder.onnx",
+}
+
+def download_if_needed():
+    for filename, url in FILES.items():
+        path = os.path.join(MODEL_DIR, filename)
+        if not os.path.exists(path):
+            print(f"📥 Downloading {filename}...")
+            r = requests.get(url)
+            with open(path, "wb") as f:
+                f.write(r.content)
+            print(f"✅ Saved: {path}")
+        else:
+            print(f"✔ {filename} already exists.")
+
+download_if_needed()
+
+# -------------------------------
+# LOAD ONNX MODELS LOCALLY
+# -------------------------------
 encoder_sess = ort.InferenceSession(
-    f"https://huggingface.co/{MODEL_REPO}/resolve/main/encoder.onnx",
+    os.path.join(MODEL_DIR, "encoder.onnx"),
     providers=["CPUExecutionProvider"]
 )
 
 decoder_sess = ort.InferenceSession(
-    f"https://huggingface.co/{MODEL_REPO}/resolve/main/decoder.onnx",
+    os.path.join(MODEL_DIR, "decoder.onnx"),
     providers=["CPUExecutionProvider"]
 )
 
