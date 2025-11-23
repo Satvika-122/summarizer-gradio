@@ -156,4 +156,4 @@ app = gr.Interface(
     title="📄 Tiny T5 ONNX Document Summarizer (Render Friendly)"
 )
 
-app.launch(server_name="0.0.0.0", server_port=7860)
+app.launch(server_name="0.0.0.0", server_port=10000)
