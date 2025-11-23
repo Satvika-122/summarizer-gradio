@@ -8,8 +8,8 @@ import re
 
 summarizer = pipeline(
     "summarization",
-    model="facebook/bart-large-cnn",
-    tokenizer="facebook/bart-large-cnn",
+    model="sshleifer/distilbart-cnn-12-6",
+    tokenizer="sshleifer/distilbart-cnn-12-6",
     device=-1
 )
 
