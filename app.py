@@ -70,8 +70,7 @@ try:
             trust_remote_code=True
         )
         print("✅ Tokenizer loaded with use_fast=False")
-    except Exception as tokenizer_error:
-        print(f"❌ First tokenizer attempt failed: {tokenizer_error}")
+    except Exception:
         from transformers import T5Tokenizer
         tokenizer = T5Tokenizer.from_pretrained(MODEL_REPO)
         print("✅ Tokenizer loaded with fallback")
@@ -97,70 +96,70 @@ except Exception as e:
 
 
 # ---------------------------
-# FIXED EXTRACT TEXT FOR GRADIO 4.19
+# FIXED EXTRACT TEXT FOR GRADIO 4.19 + RENDER
 # ---------------------------
 def extract_text(file):
     """
-    Fully compatible with Gradio 4.19 FileData object.
-    Handles TXT and PDF.
+    Works for:
+    ✔ FileData object
+    ✔ dict
+    ✔ list-wrapped FileData
+    ✔ local temporary paths
     """
+
+    # unwrap lists automatically
+    if isinstance(file, list) and len(file) > 0:
+        file = file[0]
 
     if file is None:
         print("❌ No file received")
         return None
 
-    try:
-        print("🔍 File received:", file)
+    print("🔍 File received:", file)
 
-        # Gradio FileData format:
-        # file.data  → bytes
-        # file.path  → temp disk path
-        # file.orig_name → original filename
-        if hasattr(file, "orig_name"):
-            filename = file.orig_name.lower()
-        else:
-            filename = file.get("orig_name", "").lower()
+    # Resolve filename
+    if hasattr(file, "orig_name"):
+        filename = file.orig_name.lower()
+    elif isinstance(file, dict) and "name" in file:
+        filename = file["name"].lower()
+    else:
+        filename = "unknown"
 
-        # Extract raw bytes
-        if hasattr(file, "data") and file.data:
-            file_bytes = file.data
-        elif isinstance(file, dict) and "data" in file:
-            file_bytes = file["data"]
-        else:
-            # fallback
-            with open(file.path, "rb") as f:
-                file_bytes = f.read()
+    # Extract raw bytes
+    if hasattr(file, "data") and file.data:
+        file_bytes = file.data
+    elif isinstance(file, dict) and "data" in file:
+        file_bytes = file["data"]
+    elif hasattr(file, "path"):
+        with open(file.path, "rb") as f:
+            file_bytes = f.read()
+    else:
+        print("❌ Could not read bytes")
+        return None
 
-        # TXT handling
-        if filename.endswith(".txt"):
-            text = file_bytes.decode("utf-8", errors="ignore")
-            print(f"✅ TXT extracted: {len(text)} chars")
+    # TXT handling
+    if filename.endswith(".txt"):
+        text = file_bytes.decode("utf-8", errors="ignore")
+        print(f"✅ TXT extracted: {len(text)} characters")
+        return text
+
+    # PDF handling
+    if filename.endswith(".pdf"):
+        try:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                pages = [p.extract_text() or "" for p in pdf.pages]
+            text = "\n".join(pages).strip()
+            if text:
+                print(f"📄 PDF extracted: {len(text)} characters")
+            else:
+                print("❌ No text in PDF (scanned?)")
             return text
+        except Exception as e:
+            print("❌ PDF extraction failed:", e)
+            return None
 
-        # PDF handling
-        if filename.endswith(".pdf"):
-            try:
-                with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-                    pages = [p.extract_text() or "" for p in pdf.pages]
-
-                text = "\n".join(pages).strip()
-
-                if text:
-                    print(f"📄 PDF extracted: {len(text)} chars")
-                    return text
-                else:
-                    print("❌ No text inside PDF (maybe scanned)")
-                    return None
-            except Exception as e:
-                print("❌ PDF extraction error:", e)
-                return None
-
-        print("❌ Unsupported file type:", filename)
-        return None
-
-    except Exception as e:
-        print("❌ General extraction error:", e)
-        return None
+    print("❌ Unsupported file type:", filename)
+    return None
 
 
 # ---------------------------
@@ -220,50 +219,45 @@ LENGTH = {
 
 
 def summarize_document(file, length):
-    if not file:
-        return "❌ Please upload a file"
-
-    print(f"📁 Processing file...")
-
+    print("🔥 summarize_document triggered")
     text = extract_text(file)
 
     if not text:
-        return (
-            "❌ Unable to extract text. Please ensure:\n"
-            "• File is not empty\n"
-            "• For PDFs: Contains selectable text\n"
-            "• File is not corrupted\n"
-        )
+        return ("❌ Unable to extract text. Please ensure:\n"
+                "• File is not empty\n"
+                "• For PDFs: Contains selectable text\n"
+                "• File is not corrupted\n")
 
     print(f"📝 Extracted {len(text)} characters")
 
     text = clean_text(text)
     max_len = LENGTH[length]
 
-    try:
-        if len(text) > 1200:
-            chunks = [text[i:i+900] for i in range(0, len(text), 900)]
-            parts = [tiny_generate(chunk, 80) for chunk in chunks]
-            combined = " ".join(parts)
-            final_summary = tiny_generate(combined, max_len)
-            return final_summary
-        else:
-            return tiny_generate(text, max_len)
-    except Exception as e:
-        return f"Summarization failed: {str(e)}"
+    if len(text) > 1200:
+        chunks = [text[i:i+900] for i in range(0, len(text), 900)]
+        parts = [tiny_generate(chunk, 80) for chunk in chunks]
+        combined = " ".join(parts)
+        return tiny_generate(combined, max_len)
+    else:
+        return tiny_generate(text, max_len)
 
 
 # ---------------------------
-# GRADIO UI
+# GRADIO UI (FIXED BUTTON)
 # ---------------------------
+def handle_click(file, length):
+    # unwrap list if Gradio sends [File]
+    if isinstance(file, list) and len(file) > 0:
+        file = file[0]
+    return summarize_document(file, length)
+
+
 with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
     gr.Markdown("## 📄 Tiny T5 ONNX Document Summarizer")
     gr.Markdown("Upload a PDF or TXT file to generate a summary")
 
-    file_input = gr.File(
-        label="Upload PDF or TXT",
-        file_types=[".pdf", ".txt"]
-    )
+    file_input = gr.File(label="Upload PDF or TXT",
+                         file_types=[".pdf", ".txt"])
 
     length_input = gr.Dropdown(
         ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
@@ -274,7 +268,7 @@ with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
     output = gr.Textbox(label="Summary", lines=10)
 
     btn = gr.Button("Summarize")
-    btn.click(summarize_document, [file_input, length_input], output)
+    btn.click(fn=handle_click, inputs=[file_input, length_input], outputs=output)
 
 
 # ---------------------------
