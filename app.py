@@ -265,14 +265,17 @@ def summarize_document(file, length):
 # ---------------------------
 # GRADIO UI
 # ---------------------------
+# ---------------------------
+# GRADIO UI
+# ---------------------------
 with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
     gr.Markdown("## 📄 Tiny T5 ONNX Document Summarizer")
     gr.Markdown("Upload a PDF or TXT file to generate a summary")
 
     file_input = gr.File(
         label="Upload PDF or TXT",
-        file_types=[".pdf", ".txt"],
-        type="file"
+        file_types=[".pdf", ".txt"]
+        # REMOVED: type="file" - this parameter is invalid in Gradio 4.19.2
     )
     length_input = gr.Dropdown(
         ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
