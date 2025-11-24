@@ -1,80 +1,109 @@
 import os
 import gradio as gr
-import re
-from optimum.onnxruntime import ORTModelForSeq2SeqLM
+import requests
+import numpy as np
+import onnxruntime as ort
 from transformers import AutoTokenizer
+import re
 import time
 
-print("🚀 Starting app with Optimum ONNX Runtime...")
+print("🚀 Starting BART ONNX Summarizer...")
 
-MODEL_REPO = "google/flan-t5-small"  # Using a reliable model
-MODEL_DIR = "onnx_model_optimum"
+MODEL_DIR = "bart_onnx"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# URLs for Xenova's BART-base ONNX repo
+FILES = {
+    "model.onnx": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/model.onnx",
+    "config.json": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/config.json",
+    "tokenizer.json": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/tokenizer.json",
+    "tokenizer_config.json": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/tokenizer_config.json",
+    "vocab.json": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/vocab.json",
+    "merges.txt": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/merges.txt"
+}
 
 # ---------------------------
-# Load Model & Tokenizer using Optimum
+# DOWNLOAD ONNX + TOKENIZER FILES
 # ---------------------------
-print("🔧 Loading model with Optimum (this handles ONNX properly)...")
+def download_file(url, dest):
+    if os.path.exists(dest):
+        return
+    print(f"⬇ Downloading {os.path.basename(dest)}...")
+    r = requests.get(url, stream=True)
+    with open(dest, "wb") as f:
+        f.write(r.content)
+    print(f"✔ Downloaded")
 
-# Load tokenizer
-tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO)
+print("🔍 Checking ONNX files...")
+for name, url in FILES.items():
+    download_file(url, os.path.join(MODEL_DIR, name))
 
-# Load ONNX model with Optimum - it will export if needed
-# This properly handles dynamic shapes
-model = ORTModelForSeq2SeqLM.from_pretrained(
-    MODEL_REPO,
-    export=True,  # Auto-export to ONNX if not already
-    cache_dir=MODEL_DIR,
-    provider="CPUExecutionProvider"
+print("✔ All files ready")
+
+# ---------------------------
+# LOAD TOKENIZER
+# ---------------------------
+print("🔧 Loading tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+print("✔ Tokenizer ready")
+
+
+# ---------------------------
+# LOAD ONNX RUNTIME SESSION
+# ---------------------------
+print("🔧 Loading ONNX Runtime session...")
+sess_opts = ort.SessionOptions()
+sess_opts.enable_mem_pattern = False
+sess_opts.enable_cpu_mem_arena = False
+sess_opts.log_severity_level = 2
+
+session = ort.InferenceSession(
+    os.path.join(MODEL_DIR, "model.onnx"),
+    sess_options=sess_opts,
+    providers=["CPUExecutionProvider"]
 )
 
-print("✔ Model and tokenizer loaded successfully")
+print("✔ ONNX model loaded")
+
 
 # ---------------------------
-# Cleaning helper
+# CLEAN TEXT
 # ---------------------------
 def clean_text(t):
-    return re.sub(r"\s+", " ", t or "").strip()
+    t = re.sub(r"\s+", " ", t or "")
+    return t.strip()
+
 
 # ---------------------------
-# Generate summary using Optimum
+# GENERATE SUMMARY USING BART ONNX
 # ---------------------------
-def generate_summary(text, max_length=150):
-    """
-    Generate summary using Optimum's ONNX model.
-    This handles all the ONNX complexity internally.
-    """
-    # Prepare input with summarization prompt
-    prompt = "summarize: " + text
-    
-    # Tokenize
+def generate_summary(text, max_len=150):
     inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        max_length=512,
-        truncation=True
+        text,
+        return_tensors="np",
+        truncation=True,
+        padding="max_length",
+        max_length=512
     )
-    
-    # Generate
-    outputs = model.generate(
-        **inputs,
-        max_length=max_length,
-        min_length=20,
-        length_penalty=2.0,
-        num_beams=4,
-        early_stopping=True
+
+    # Run ONNX model
+    outputs = session.run(
+        None,
+        {
+            "input_ids": inputs["input_ids"],
+            "attention_mask": inputs["attention_mask"]
+        }
     )
-    
-    # Decode
-    summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    summary_ids = outputs[0]
+    summary = tokenizer.batch_decode(summary_ids, skip_special_tokens=True)[0]
     return summary
 
+
 # ---------------------------
-# Summarizer with chunking for long texts
+# CHUNKING FOR LONG TEXTS
 # ---------------------------
-CHUNK_SIZE = 1000  # characters per chunk
+CHUNK_SIZE = 1500
 
 LENGTH_MAP = {
     "Short (100 words)": 80,
@@ -82,76 +111,57 @@ LENGTH_MAP = {
     "Long (500 words)": 250
 }
 
-def summarize_text(input_text, length):
-    if not input_text or input_text.strip() == "":
+def summarize_text(text, length):
+    if not text:
         return "❌ Please paste some text."
 
-    text = clean_text(input_text)
-    
-    # If text is short, summarize directly
+    text = clean_text(text)
+
+    # If short → direct summarization
     if len(text) <= CHUNK_SIZE:
-        try:
-            return generate_summary(text, max_length=LENGTH_MAP[length])
-        except Exception as e:
-            return f"❌ Error: {str(e)}"
-    
-    # For long texts, chunk and combine
-    chunks = [text[i:i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
-    
-    summaries = []
+        return generate_summary(text, max_len=LENGTH_MAP[length])
+
+    # Long text → chunking
+    chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+    partial_summaries = []
+
     for i, chunk in enumerate(chunks):
-        try:
-            print(f"Processing chunk {i+1}/{len(chunks)}...")
-            summary = generate_summary(chunk, max_length=100)
-            if summary.strip():
-                summaries.append(summary)
-            time.sleep(0.05)  # Small delay between chunks
-        except Exception as e:
-            print(f"Error on chunk {i+1}: {e}")
-            continue
-    
-    if not summaries:
-        return "❌ Failed to generate summary."
-    
-    # Combine chunk summaries
-    combined = " ".join(summaries)
-    
-    # Final summary pass
-    try:
-        final_summary = generate_summary(combined, max_length=LENGTH_MAP[length])
-        return final_summary
-    except Exception as e:
-        return f"❌ Error in final summary: {str(e)}"
+        print(f"📦 Chunk {i+1}/{len(chunks)}")
+        part = generate_summary(chunk, max_len=120)
+        partial_summaries.append(part)
+        time.sleep(0.05)
+
+    combined_text = " ".join(partial_summaries)
+
+    # Final summary from all partial ones
+    return generate_summary(combined_text, max_len=LENGTH_MAP[length])
+
 
 # ---------------------------
-# Gradio UI
+# GRADIO UI
 # ---------------------------
-with gr.Blocks(title="📄 T5 ONNX Text Summarizer") as app:
-    gr.Markdown("## 📄 T5 ONNX Text Summarizer (Optimum)")
-    gr.Markdown("Paste text below and click **Summarize**. Uses Optimum for proper ONNX runtime.")
+with gr.Blocks(title="📄 BART ONNX Summarizer") as app:
+    gr.Markdown("## 📄 BART ONNX Document Summarizer")
+    gr.Markdown("Paste your text below and click **Summarize**.")
 
-    input_box = gr.Textbox(
-        label="Paste Text",
-        placeholder="Paste your text here...",
-        lines=12
-    )
-    length_input = gr.Dropdown(
+    input_box = gr.Textbox(lines=12, label="Paste text")
+    length_dd = gr.Dropdown(
         ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
         value="Medium (250 words)",
         label="Summary Length"
     )
-    output = gr.Textbox(label="Summary", lines=10)
-    btn = gr.Button("Summarize", variant="primary")
-    
-    btn.click(summarize_text, [input_box, length_input], output)
+    output_box = gr.Textbox(lines=10, label="Summary")
+
+    summarize_btn = gr.Button("Summarize")
+    summarize_btn.click(summarize_text, [input_box, length_dd], output_box)
+
 
 # ---------------------------
-# Launch
+# LAUNCH (Render)
 # ---------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
     app.launch(
         server_name="0.0.0.0",
-        server_port=port,
+        server_port=int(os.environ.get("PORT", 8080)),
         share=False
-    ) 
+    )
