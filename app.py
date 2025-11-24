@@ -101,22 +101,65 @@ except Exception as e:
 
 
 # ---------------------------
-# TEXT EXTRACT
+# TEXT EXTRACT - FIXED VERSION
 # ---------------------------
 def extract_text(file_obj):
     try:
+        print(f"🔍 Attempting to extract text from: {file_obj.name}")
+        
+        # For TXT files - FIXED HANDLING
         if file_obj.name.endswith(".txt"):
-            return file_obj.read().decode("utf-8", errors="ignore")
+            try:
+                # Reset file pointer to beginning
+                file_obj.seek(0)
+                content = file_obj.read()
+                
+                # Handle both bytes and string content
+                if isinstance(content, bytes):
+                    text = content.decode("utf-8", errors="ignore")
+                else:
+                    text = str(content)
+                
+                print(f"✅ TXT extraction successful: {len(text)} characters")
+                return text
+            except Exception as e:
+                print(f"❌ TXT extraction failed: {e}")
+                return None
 
-        if file_obj.name.endswith(".pdf"):
-            text = ""
-            with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
-                for page in pdf.pages:
-                    t = page.extract_text()
-                    if t:
-                        text += t + " "
-            return text
-    except:
+        # For PDF files - FIXED HANDLING
+        elif file_obj.name.endswith(".pdf"):
+            try:
+                # Reset file pointer to beginning
+                file_obj.seek(0)
+                file_content = file_obj.read()
+                
+                text = ""
+                with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                    for i, page in enumerate(pdf.pages):
+                        page_text = page.extract_text()
+                        if page_text and page_text.strip():
+                            text += page_text + "\n"
+                            print(f"📄 Page {i+1}: {len(page_text)} characters")
+                        else:
+                            print(f"📄 Page {i+1}: No text found (may be image-based)")
+                
+                if text.strip():
+                    print(f"✅ PDF extraction successful: {len(text)} characters from {len(pdf.pages)} pages")
+                    return text
+                else:
+                    print("❌ PDF extraction: No text content found")
+                    return None
+                    
+            except Exception as e:
+                print(f"❌ PDF extraction failed: {e}")
+                return None
+
+        else:
+            print(f"❌ Unsupported file type: {file_obj.name}")
+            return None
+
+    except Exception as e:
+        print(f"❌ General extraction error: {e}")
         return None
 
 
@@ -167,7 +210,7 @@ def tiny_generate(text, max_len=120):
 
 
 # ---------------------------
-# MAIN SUMMARIZER
+# MAIN SUMMARIZER - IMPROVED VERSION
 # ---------------------------
 LENGTH = {
     "Short (100 words)": 120,
@@ -180,20 +223,43 @@ def summarize_document(file, length):
     if not file:
         return "❌ Please upload a file"
 
+    print(f"📁 Processing file: {file.name}")
+    
     text = extract_text(file)
+    
     if not text:
-        return "❌ Unable to extract text"
+        return "❌ Unable to extract text. Please ensure:\n• File is not empty\n• For PDFs: Contains selectable text (not scanned images)\n• File is not corrupted\n\nCheck the server logs for detailed error information."
 
+    print(f"📝 Successfully extracted {len(text)} characters")
+    
     text = clean_text(text)
     max_len = LENGTH[length]
 
-    if len(text) > 1200:
-        chunks = [text[i:i+900] for i in range(0, len(text), 900)]
-        parts = [tiny_generate(ch, 80) for ch in chunks]
-        combined = " ".join(parts)
-        return tiny_generate(combined, max_len)
-    else:
-        return tiny_generate(text, max_len)
+    print(f"🎯 Generating summary (max {max_len} tokens)")
+    
+    try:
+        if len(text) > 1200:
+            print("📦 Text is long, using chunked summarization...")
+            chunks = [text[i:i+900] for i in range(0, len(text), 900)]
+            print(f"📋 Split into {len(chunks)} chunks")
+            
+            parts = []
+            for i, chunk in enumerate(chunks):
+                print(f"🔄 Processing chunk {i+1}/{len(chunks)}...")
+                part = tiny_generate(chunk, 80)
+                parts.append(part)
+            
+            combined = " ".join(parts)
+            final_summary = tiny_generate(combined, max_len)
+            print(f"✅ Final summary generated: {len(final_summary)} characters")
+            return final_summary
+        else:
+            summary = tiny_generate(text, max_len)
+            print(f"✅ Summary generated: {len(summary)} characters")
+            return summary
+    except Exception as e:
+        print(f"❌ Summarization failed: {e}")
+        return f"Summarization error: {str(e)}"
 
 
 # ---------------------------
@@ -201,12 +267,17 @@ def summarize_document(file, length):
 # ---------------------------
 with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
     gr.Markdown("## 📄 Tiny T5 ONNX Document Summarizer")
+    gr.Markdown("Upload a PDF or TXT file to generate a summary")
 
-    file_input = gr.File(label="Upload PDF or TXT",
-                         file_types=[".pdf", ".txt"])
+    file_input = gr.File(
+        label="Upload PDF or TXT",
+        file_types=[".pdf", ".txt"],
+        type="file"
+    )
     length_input = gr.Dropdown(
         ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
-        value="Medium (250 words)"
+        value="Medium (250 words)",
+        label="Summary Length"
     )
     output = gr.Textbox(label="Summary", lines=10)
 
