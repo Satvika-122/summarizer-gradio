@@ -1,20 +1,49 @@
 import os
 import gradio as gr
-import requests
 import re
 
-print("🚀 Starting Summarizer...")
-
-# Hugging Face Inference API - no local models, no PyTorch
-API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
+print("🚀 Starting Text Summarizer...")
 
 def clean_text(t):
     return re.sub(r"\s+", " ", t or "").strip()
 
+def extractive_summarize(text, sentences_count=3):
+    """Simple extractive summarization using text rank algorithm"""
+    # Split into sentences
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    
+    if len(sentences) <= sentences_count:
+        return text
+    
+    # Simple scoring: sentence length + keyword frequency
+    words = text.lower().split()
+    word_freq = {}
+    for word in words:
+        if len(word) > 3:  # Ignore short words
+            word_freq[word] = word_freq.get(word, 0) + 1
+    
+    scored_sentences = []
+    for sentence in sentences:
+        score = len(sentence.split())  # Length score
+        # Keyword score
+        for word in sentence.lower().split():
+            if word in word_freq and len(word) > 3:
+                score += word_freq[word]
+        scored_sentences.append((score, sentence))
+    
+    # Get top sentences (maintain order)
+    scored_sentences.sort(reverse=True)
+    top_sentences = scored_sentences[:sentences_count]
+    top_sentences.sort(key=lambda x: sentences.index(x[1]))  # Restore original order
+    
+    summary = '. '.join([s[1] for s in top_sentences]) + '.'
+    return summary
+
 LENGTH_MAP = {
-    "Short (100 words)": 100,
-    "Medium (250 words)": 150,
-    "Long (500 words)": 250
+    "Short (2-3 sentences)": 2,
+    "Medium (3-4 sentences)": 3, 
+    "Long (4-5 sentences)": 4
 }
 
 def summarize_text(text, length):
@@ -24,36 +53,29 @@ def summarize_text(text, length):
     text = clean_text(text)
     
     try:
-        payload = {
-            "inputs": text,
-            "parameters": {
-                "max_length": LENGTH_MAP[length],
-                "min_length": 30,
-                "do_sample": False
-            }
-        }
+        if len(text.split()) < 50:
+            return "📝 Text is too short. Please provide at least 50 words for better summarization."
         
-        response = requests.post(API_URL, json=payload)
-        result = response.json()
-        
-        if isinstance(result, list) and len(result) > 0:
-            return result[0]['summary_text']
-        elif 'error' in result:
-            return f"❌ Model is loading, please wait... (try again in 30 seconds)"
-        else:
-            return "❌ Could not generate summary"
-            
+        summary = extractive_summarize(text, LENGTH_MAP[length])
+        return summary
     except Exception as e:
         return f"❌ Error: {str(e)}"
 
 with gr.Blocks(title="📄 Text Summarizer") as app:
     gr.Markdown("## 📄 Text Summarizer")
-    gr.Markdown("Paste your text below and click **Summarize**.")
+    gr.Markdown("Simple extractive summarization - works instantly!")
+    
+    gr.Markdown("""
+    **How it works:**
+    - Extracts the most important sentences based on length and keyword frequency
+    - No external APIs or model downloads
+    - Works completely offline
+    """)
 
-    input_box = gr.Textbox(lines=12, label="Paste text")
+    input_box = gr.Textbox(lines=12, label="Paste text", placeholder="Paste your article or long text here...")
     length_dd = gr.Dropdown(
-        ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
-        value="Medium (250 words)",
+        ["Short (2-3 sentences)", "Medium (3-4 sentences)", "Long (4-5 sentences)"],
+        value="Medium (3-4 sentences)",
         label="Summary Length"
     )
     output_box = gr.Textbox(lines=10, label="Summary")
