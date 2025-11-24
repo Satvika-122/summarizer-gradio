@@ -15,7 +15,6 @@ MODEL_REPO = "Satvi/tiny_t5"
 MODEL_DIR = "onnx_model"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# Set environment variable for tokenizers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ---------------------------
@@ -63,10 +62,8 @@ print("🔧 Initializing models...")
 try:
     download_models()
 
-    # FIXED TOKENIZER LOADING FOR RENDER
     print("🔹 Loading tokenizer...")
     try:
-        # First try with use_fast=False
         tokenizer = AutoTokenizer.from_pretrained(
             MODEL_REPO,
             use_fast=False,
@@ -75,10 +72,9 @@ try:
         print("✅ Tokenizer loaded with use_fast=False")
     except Exception as tokenizer_error:
         print(f"❌ First tokenizer attempt failed: {tokenizer_error}")
-        # Fallback to T5Tokenizer specifically
         from transformers import T5Tokenizer
         tokenizer = T5Tokenizer.from_pretrained(MODEL_REPO)
-        print("✅ Tokenizer loaded with T5Tokenizer fallback")
+        print("✅ Tokenizer loaded with fallback")
 
     print("🔹 Loading ONNX sessions...")
     enc_sess = ort.InferenceSession(
@@ -101,77 +97,81 @@ except Exception as e:
 
 
 # ---------------------------
-# TEXT EXTRACT - FIXED VERSION
+# FIXED EXTRACT TEXT FOR GRADIO 4.19
 # ---------------------------
-def extract_text(file_obj):
-    try:
-        print(f"🔍 Attempting to extract text from: {file_obj.name}")
-        
-        # For TXT files - FIXED HANDLING
-        if file_obj.name.endswith(".txt"):
-            try:
-                # Reset file pointer to beginning
-                file_obj.seek(0)
-                content = file_obj.read()
-                
-                # Handle both bytes and string content
-                if isinstance(content, bytes):
-                    text = content.decode("utf-8", errors="ignore")
-                else:
-                    text = str(content)
-                
-                print(f"✅ TXT extraction successful: {len(text)} characters")
-                return text
-            except Exception as e:
-                print(f"❌ TXT extraction failed: {e}")
-                return None
+def extract_text(file):
+    """
+    Fully compatible with Gradio 4.19 FileData object.
+    Handles TXT and PDF.
+    """
 
-        # For PDF files - FIXED HANDLING
-        elif file_obj.name.endswith(".pdf"):
+    if file is None:
+        print("❌ No file received")
+        return None
+
+    try:
+        print("🔍 File received:", file)
+
+        # Gradio FileData format:
+        # file.data  → bytes
+        # file.path  → temp disk path
+        # file.orig_name → original filename
+        if hasattr(file, "orig_name"):
+            filename = file.orig_name.lower()
+        else:
+            filename = file.get("orig_name", "").lower()
+
+        # Extract raw bytes
+        if hasattr(file, "data") and file.data:
+            file_bytes = file.data
+        elif isinstance(file, dict) and "data" in file:
+            file_bytes = file["data"]
+        else:
+            # fallback
+            with open(file.path, "rb") as f:
+                file_bytes = f.read()
+
+        # TXT handling
+        if filename.endswith(".txt"):
+            text = file_bytes.decode("utf-8", errors="ignore")
+            print(f"✅ TXT extracted: {len(text)} chars")
+            return text
+
+        # PDF handling
+        if filename.endswith(".pdf"):
             try:
-                # Reset file pointer to beginning
-                file_obj.seek(0)
-                file_content = file_obj.read()
-                
-                text = ""
-                with pdfplumber.open(io.BytesIO(file_content)) as pdf:
-                    for i, page in enumerate(pdf.pages):
-                        page_text = page.extract_text()
-                        if page_text and page_text.strip():
-                            text += page_text + "\n"
-                            print(f"📄 Page {i+1}: {len(page_text)} characters")
-                        else:
-                            print(f"📄 Page {i+1}: No text found (may be image-based)")
-                
-                if text.strip():
-                    print(f"✅ PDF extraction successful: {len(text)} characters from {len(pdf.pages)} pages")
+                with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                    pages = [p.extract_text() or "" for p in pdf.pages]
+
+                text = "\n".join(pages).strip()
+
+                if text:
+                    print(f"📄 PDF extracted: {len(text)} chars")
                     return text
                 else:
-                    print("❌ PDF extraction: No text content found")
+                    print("❌ No text inside PDF (maybe scanned)")
                     return None
-                    
             except Exception as e:
-                print(f"❌ PDF extraction failed: {e}")
+                print("❌ PDF extraction error:", e)
                 return None
 
-        else:
-            print(f"❌ Unsupported file type: {file_obj.name}")
-            return None
+        print("❌ Unsupported file type:", filename)
+        return None
 
     except Exception as e:
-        print(f"❌ General extraction error: {e}")
+        print("❌ General extraction error:", e)
         return None
 
 
 # ---------------------------
-# TEXT CLEANING
+# CLEANING
 # ---------------------------
 def clean_text(t):
     return re.sub(r"\s+", " ", t or "").strip()
 
 
 # ---------------------------
-# SUMMARIZATION
+# SUMMARY GENERATION
 # ---------------------------
 def tiny_generate(text, max_len=120):
     try:
@@ -210,7 +210,7 @@ def tiny_generate(text, max_len=120):
 
 
 # ---------------------------
-# MAIN SUMMARIZER - IMPROVED VERSION
+# MAIN SUMMARIZER
 # ---------------------------
 LENGTH = {
     "Short (100 words)": 120,
@@ -223,48 +223,36 @@ def summarize_document(file, length):
     if not file:
         return "❌ Please upload a file"
 
-    print(f"📁 Processing file: {file.name}")
-    
-    text = extract_text(file)
-    
-    if not text:
-        return "❌ Unable to extract text. Please ensure:\n• File is not empty\n• For PDFs: Contains selectable text (not scanned images)\n• File is not corrupted\n\nCheck the server logs for detailed error information."
+    print(f"📁 Processing file...")
 
-    print(f"📝 Successfully extracted {len(text)} characters")
-    
+    text = extract_text(file)
+
+    if not text:
+        return (
+            "❌ Unable to extract text. Please ensure:\n"
+            "• File is not empty\n"
+            "• For PDFs: Contains selectable text\n"
+            "• File is not corrupted\n"
+        )
+
+    print(f"📝 Extracted {len(text)} characters")
+
     text = clean_text(text)
     max_len = LENGTH[length]
 
-    print(f"🎯 Generating summary (max {max_len} tokens)")
-    
     try:
         if len(text) > 1200:
-            print("📦 Text is long, using chunked summarization...")
             chunks = [text[i:i+900] for i in range(0, len(text), 900)]
-            print(f"📋 Split into {len(chunks)} chunks")
-            
-            parts = []
-            for i, chunk in enumerate(chunks):
-                print(f"🔄 Processing chunk {i+1}/{len(chunks)}...")
-                part = tiny_generate(chunk, 80)
-                parts.append(part)
-            
+            parts = [tiny_generate(chunk, 80) for chunk in chunks]
             combined = " ".join(parts)
             final_summary = tiny_generate(combined, max_len)
-            print(f"✅ Final summary generated: {len(final_summary)} characters")
             return final_summary
         else:
-            summary = tiny_generate(text, max_len)
-            print(f"✅ Summary generated: {len(summary)} characters")
-            return summary
+            return tiny_generate(text, max_len)
     except Exception as e:
-        print(f"❌ Summarization failed: {e}")
-        return f"Summarization error: {str(e)}"
+        return f"Summarization failed: {str(e)}"
 
 
-# ---------------------------
-# GRADIO UI
-# ---------------------------
 # ---------------------------
 # GRADIO UI
 # ---------------------------
@@ -275,13 +263,14 @@ with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
     file_input = gr.File(
         label="Upload PDF or TXT",
         file_types=[".pdf", ".txt"]
-        # REMOVED: type="file" - this parameter is invalid in Gradio 4.19.2
     )
+
     length_input = gr.Dropdown(
         ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
         value="Medium (250 words)",
         label="Summary Length"
     )
+
     output = gr.Textbox(label="Summary", lines=10)
 
     btn = gr.Button("Summarize")
@@ -289,7 +278,7 @@ with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
 
 
 # ---------------------------
-# RENDER FIX → LAUNCH SERVER
+# RENDER LAUNCH
 # ---------------------------
 if __name__ == "__main__":
     app.launch(
