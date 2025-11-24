@@ -118,16 +118,17 @@ def tiny_generate(text, max_len=60, tokenizer_max_len=128):
     # create fresh decoder session for this generation to avoid buffer reuse problems
     dec_sess_local = create_decoder_session()
 
-    # decoder start token ids (shape: 1 x 1)
-    dec_ids = np.array([[PAD]], dtype=np.int64)
+    # decoder start token (typically 0 for T5)
+    decoder_start_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    dec_ids = np.array([[decoder_start_token_id]], dtype=np.int64)
     generated = []
 
     for _ in range(max_len):
-        # dec_sess_local expects "decoder_input_ids" (not "input_ids")
+        # FIXED: Use "input_ids" not "decoder_input_ids"
         logits = dec_sess_local.run(
             None,
             {
-                "decoder_input_ids": dec_ids,
+                "input_ids": dec_ids,  # ✅ FIXED
                 "encoder_hidden_states": enc_out
             }
         )[0]
