@@ -16,23 +16,22 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 # ---------------------------------------------------------
-# RELIABLE ONNX DOWNLOADER (Render safe)
+# RELIABLE ONNX DOWNLOADER
 # ---------------------------------------------------------
 def force_download(url, dest):
-    if os.path.exists(dest) and os.path.getsize(dest) > 1000:
+    if os.path.exists(dest) and os.path.getsize(dest) > 500:
         print(f"✔ Using cached {os.path.basename(dest)}")
         return
 
     print(f"⬇ Downloading {url} ...")
-
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers)
 
-    if response.status_code != 200:
-        raise Exception(f"❌ Download failed: HTTP {response.status_code}")
+    r = requests.get(url, headers=headers)
+    if r.status_code != 200:
+        raise Exception(f"❌ Download failed ({r.status_code}) → {url}")
 
     with open(dest, "wb") as f:
-        f.write(response.content)
+        f.write(r.content)
 
     print(f"✔ Saved: {dest}")
 
@@ -61,17 +60,30 @@ tokenizer = AutoTokenizer.from_pretrained(
 PAD = tokenizer.pad_token_id or 0
 EOS = tokenizer.eos_token_id
 
-print("🔹 Loading ONNX sessions…")
+
+# ---------------------------------------------------------
+# ONNX SESSION WITH FIX FOR SHAPE MISMATCH
+# ---------------------------------------------------------
+sess_opts = ort.SessionOptions()
+sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+# 🔥 FIX: Disable memory pattern reuse → prevents MatMul shape mismatch
+sess_opts.enable_mem_pattern = False
+sess_opts.enable_cpu_mem_arena = False
+sess_opts.log_severity_level = 2
+
 enc_sess = ort.InferenceSession(
     os.path.join(MODEL_DIR, "encoder.onnx"),
+    sess_options=sess_opts,
     providers=["CPUExecutionProvider"]
 )
 dec_sess = ort.InferenceSession(
     os.path.join(MODEL_DIR, "decoder.onnx"),
+    sess_options=sess_opts,
     providers=["CPUExecutionProvider"]
 )
 
-print("✔ Models loaded successfully!")
+print("✔ ONNX sessions loaded safely")
 
 
 # ---------------------------------------------------------
@@ -82,12 +94,12 @@ def clean_text(t):
 
 
 # ---------------------------------------------------------
-# FIXED TINY GENERATOR (Correct ONNX Inputs)
+# FIXED TINY T5 ONNX GENERATOR
 # ---------------------------------------------------------
 def tiny_generate(text, max_len=120):
     prompt = "summarize: " + text
 
-    # ONNX tiny T5 breaks on long tokens → reduce to 256
+    # 🔥 Safe tokenizer length for tiny_t5
     tokens = tokenizer(
         prompt,
         return_tensors="np",
@@ -108,7 +120,7 @@ def tiny_generate(text, max_len=120):
         logits = dec_sess.run(
             None,
             {
-                "decoder_input_ids": dec_ids,         # FIXED
+                "decoder_input_ids": dec_ids,      # 🔥 FIXED
                 "encoder_hidden_states": enc_out
             }
         )[0]
@@ -120,7 +132,6 @@ def tiny_generate(text, max_len=120):
 
         generated.append(next_tok)
 
-        # Append
         dec_ids = np.concatenate(
             [dec_ids, np.array([[next_tok]], dtype=np.int64)],
             axis=1
@@ -130,7 +141,7 @@ def tiny_generate(text, max_len=120):
 
 
 # ---------------------------------------------------------
-# MAIN SUMMARIZER (Text only)
+# MAIN SUMMARIZER (TEXT ONLY)
 # ---------------------------------------------------------
 LENGTH = {
     "Short (100 words)": 120,
@@ -146,9 +157,9 @@ def summarize_text(input_text, length):
     text = clean_text(input_text)
     max_tokens = LENGTH[length]
 
-    # Long text handling
+    # 🔥 Safe chunking to avoid long-seq ONNX crashes
     if len(text) > 1500:
-        chunks = [text[i:i+900] for i in range(0, len(text), 900)]
+        chunks = [text[i:i+700] for i in range(0, len(text), 700)]
         parts = [tiny_generate(chunk, 80) for chunk in chunks]
         combined = " ".join(parts)
         return tiny_generate(combined, max_tokens)
@@ -161,28 +172,28 @@ def summarize_text(input_text, length):
 # ---------------------------------------------------------
 with gr.Blocks(title="📄 Tiny T5 ONNX Text Summarizer") as app:
     gr.Markdown("## 📄 Tiny T5 ONNX Text Summarizer")
-    gr.Markdown("Paste your text below and click **Summarize**")
+    gr.Markdown("Paste text below and click **Summarize**")
 
-    input_text = gr.Textbox(
+    input_box = gr.Textbox(
         label="Paste Text",
-        placeholder="Paste or type your text here…",
+        placeholder="Paste or type your text here...",
         lines=12
     )
 
     length_input = gr.Dropdown(
         ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
-        value="Short (100 words)",
+        value="Medium (250 words)",
         label="Summary Length"
     )
 
     output = gr.Textbox(label="Summary", lines=10)
-
     btn = gr.Button("Summarize")
-    btn.click(summarize_text, [input_text, length_input], output)
+
+    btn.click(summarize_text, [input_box, length_input], output)
 
 
 # ---------------------------------------------------------
-# RENDER LAUNCH
+# RENDER SERVER
 # ---------------------------------------------------------
 if __name__ == "__main__":
     app.launch(
