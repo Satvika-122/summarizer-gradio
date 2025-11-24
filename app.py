@@ -220,7 +220,7 @@ with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
 if __name__ == "__main__":
     app.launch(
         server_name="0.0.0.0",
-        server_port=int(os.environ.get("PORT", 10000)),
+        server_port=int(os.environ.get("PORT", 8080)),  # ← CHANGED THIS LINE
         share=False,
         quiet=False
     )
