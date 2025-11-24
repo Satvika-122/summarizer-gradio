@@ -152,8 +152,10 @@ app = gr.Interface(
         gr.File(label="Upload PDF or TXT"),
         gr.Dropdown(["100 words", "250 words", "500 words"], value="250 words")
     ],
-    outputs=gr.Markdown(),
-    title="📄 Tiny T5 ONNX Document Summarizer (Render Friendly)"
+    outputs=gr.Textbox(label="Summary"),  # Changed from Markdown to Textbox
+    title="📄 Tiny T5 ONNX Document Summarizer (Render Friendly)",
+    description="Upload a PDF or TXT file to generate a summary"
 )
 
-app.launch(server_name="0.0.0.0", server_port=10000)
+# FIXED LAUNCH - Added share=False to prevent the localhost accessibility error
+app.launch(server_name="0.0.0.0", server_port=10000, share=False)
