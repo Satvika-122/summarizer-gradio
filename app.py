@@ -15,6 +15,8 @@ MODEL_REPO = "Satvi/tiny_t5"
 MODEL_DIR = "onnx_model"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# Set environment variable for tokenizers
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ---------------------------
 # DOWNLOAD UTILS
@@ -61,7 +63,22 @@ print("🔧 Initializing models...")
 try:
     download_models()
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO)
+    # FIXED TOKENIZER LOADING FOR RENDER
+    print("🔹 Loading tokenizer...")
+    try:
+        # First try with use_fast=False
+        tokenizer = AutoTokenizer.from_pretrained(
+            MODEL_REPO,
+            use_fast=False,
+            trust_remote_code=True
+        )
+        print("✅ Tokenizer loaded with use_fast=False")
+    except Exception as tokenizer_error:
+        print(f"❌ First tokenizer attempt failed: {tokenizer_error}")
+        # Fallback to T5Tokenizer specifically
+        from transformers import T5Tokenizer
+        tokenizer = T5Tokenizer.from_pretrained(MODEL_REPO)
+        print("✅ Tokenizer loaded with T5Tokenizer fallback")
 
     print("🔹 Loading ONNX sessions...")
     enc_sess = ort.InferenceSession(
@@ -128,7 +145,7 @@ def tiny_generate(text, max_len=120):
 
         for _ in range(max_len):
             logits = dec_sess.run(None, {
-                "input_ids": dec_ids,                 # ✔ FIXED NAME
+                "input_ids": dec_ids,
                 "encoder_hidden_states": enc_out
             })[0]
 
@@ -188,8 +205,7 @@ with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
     file_input = gr.File(label="Upload PDF or TXT",
                          file_types=[".pdf", ".txt"])
     length_input = gr.Dropdown(
-        ["Short (100 words)", "Medium (250 words)",
-            "Long (500 words)"],
+        ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
         value="Medium (250 words)"
     )
     output = gr.Textbox(label="Summary", lines=10)
@@ -204,7 +220,7 @@ with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
 if __name__ == "__main__":
     app.launch(
         server_name="0.0.0.0",
-        server_port=10000,
+        server_port=int(os.environ.get("PORT", 10000)),
         share=False,
         quiet=False
     )
