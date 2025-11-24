@@ -12,7 +12,7 @@ print("🚀 Starting BART ONNX Summarizer...")
 MODEL_DIR = "bart_onnx"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-MODEL_REPO = "Xenova/bart-base-onnx"
+MODEL_REPO = "Xenova/distilbart-cnn-6-6-onnx"
 
 FILES = [
     "model.onnx",
@@ -23,15 +23,10 @@ FILES = [
     "merges.txt"
 ]
 
-# ---------------------------
-# DOWNLOAD USING HUGGINGFACE HUB (CORRECT WAY)
-# ---------------------------
 print("⬇ Downloading ONNX + tokenizer files from HuggingFace Hub...")
 
 for filename in FILES:
     local_path = os.path.join(MODEL_DIR, filename)
-
-    # Download if missing or corrupted (<1 KB)
     if (not os.path.exists(local_path)) or os.path.getsize(local_path) < 500:
         print(f"⬇ Downloading: {filename}")
         hf_hub_download(
@@ -42,59 +37,36 @@ for filename in FILES:
         )
         print(f"✔ Downloaded: {filename}")
     else:
-        print(f"✔ Already exists and valid: {filename}")
+        print(f"✔ Already exists: {filename}")
 
-# ---------------------------
-# LOAD TOKENIZER
-# ---------------------------
 print("🔧 Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
 print("✔ Tokenizer ready")
 
-
-# ---------------------------
-# LOAD ONNX RUNTIME SESSION
-# ---------------------------
 print("🔧 Loading ONNX Runtime model...")
-
-sess_opts = ort.SessionOptions()
-sess_opts.enable_mem_pattern = False
-sess_opts.enable_cpu_mem_arena = False
-sess_opts.log_severity_level = 2
-
 session = ort.InferenceSession(
     os.path.join(MODEL_DIR, "model.onnx"),
-    providers=["CPUExecutionProvider"],
-    sess_options=sess_opts
+    providers=["CPUExecutionProvider"]
 )
-
 print("✔ ONNX model loaded")
 
-
-# ---------------------------
-# CLEAN TEXT
-# ---------------------------
 def clean_text(t):
     return re.sub(r"\s+", " ", t or "").strip()
 
-
-# ---------------------------
-# GENERATE SUMMARY
-# ---------------------------
 def generate_summary(text, max_len=150):
     inputs = tokenizer(
         text,
         return_tensors="np",
         padding="max_length",
         truncation=True,
-        max_length=512
+        max_length=1024
     )
 
     outputs = session.run(
         None,
         {
-            "input_ids": inputs["input_ids"],
-            "attention_mask": inputs["attention_mask"]
+            "input_ids": inputs["input_ids"].astype(np.int64),
+            "attention_mask": inputs["attention_mask"].astype(np.int64)
         }
     )
 
@@ -102,10 +74,6 @@ def generate_summary(text, max_len=150):
     summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
     return summary
 
-
-# ---------------------------
-# CHUNK LONG TEXT
-# ---------------------------
 CHUNK_SIZE = 1500
 
 LENGTH_MAP = {
@@ -134,10 +102,6 @@ def summarize_text(text, length):
     combined = " ".join(partials)
     return generate_summary(combined, LENGTH_MAP[length])
 
-
-# ---------------------------
-# GRADIO UI
-# ---------------------------
 with gr.Blocks(title="📄 BART ONNX Summarizer") as app:
     gr.Markdown("## 📄 BART ONNX Summarizer")
     gr.Markdown("Paste your text below and click **Summarize**.")
@@ -153,10 +117,6 @@ with gr.Blocks(title="📄 BART ONNX Summarizer") as app:
     summarize_btn = gr.Button("Summarize")
     summarize_btn.click(summarize_text, [input_box, length_dd], output_box)
 
-
-# ---------------------------
-# LAUNCH
-# ---------------------------
 if __name__ == "__main__":
     app.launch(
         server_name="0.0.0.0",
