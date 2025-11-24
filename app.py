@@ -1,9 +1,9 @@
 import os
 import gradio as gr
-import requests
 import numpy as np
 import onnxruntime as ort
 from transformers import AutoTokenizer
+from huggingface_hub import hf_hub_download
 import re
 import time
 
@@ -12,33 +12,37 @@ print("🚀 Starting BART ONNX Summarizer...")
 MODEL_DIR = "bart_onnx"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# URLs for Xenova's BART-base ONNX repo
-FILES = {
-    "model.onnx": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/model.onnx",
-    "config.json": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/config.json",
-    "tokenizer.json": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/tokenizer.json",
-    "tokenizer_config.json": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/tokenizer_config.json",
-    "vocab.json": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/vocab.json",
-    "merges.txt": "https://huggingface.co/Xenova/bart-base-onnx/resolve/main/merges.txt"
-}
+MODEL_REPO = "Xenova/bart-base-onnx"
+
+FILES = [
+    "model.onnx",
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt"
+]
 
 # ---------------------------
-# DOWNLOAD ONNX + TOKENIZER FILES
+# DOWNLOAD USING HUGGINGFACE HUB (CORRECT WAY)
 # ---------------------------
-def download_file(url, dest):
-    if os.path.exists(dest):
-        return
-    print(f"⬇ Downloading {os.path.basename(dest)}...")
-    r = requests.get(url, stream=True)
-    with open(dest, "wb") as f:
-        f.write(r.content)
-    print(f"✔ Downloaded")
+print("⬇ Downloading ONNX + tokenizer files from HuggingFace Hub...")
 
-print("🔍 Checking ONNX files...")
-for name, url in FILES.items():
-    download_file(url, os.path.join(MODEL_DIR, name))
+for filename in FILES:
+    local_path = os.path.join(MODEL_DIR, filename)
 
-print("✔ All files ready")
+    # Download if missing or corrupted (<1 KB)
+    if (not os.path.exists(local_path)) or os.path.getsize(local_path) < 500:
+        print(f"⬇ Downloading: {filename}")
+        hf_hub_download(
+            repo_id=MODEL_REPO,
+            filename=filename,
+            local_dir=MODEL_DIR,
+            local_dir_use_symlinks=False
+        )
+        print(f"✔ Downloaded: {filename}")
+    else:
+        print(f"✔ Already exists and valid: {filename}")
 
 # ---------------------------
 # LOAD TOKENIZER
@@ -51,7 +55,8 @@ print("✔ Tokenizer ready")
 # ---------------------------
 # LOAD ONNX RUNTIME SESSION
 # ---------------------------
-print("🔧 Loading ONNX Runtime session...")
+print("🔧 Loading ONNX Runtime model...")
+
 sess_opts = ort.SessionOptions()
 sess_opts.enable_mem_pattern = False
 sess_opts.enable_cpu_mem_arena = False
@@ -59,8 +64,8 @@ sess_opts.log_severity_level = 2
 
 session = ort.InferenceSession(
     os.path.join(MODEL_DIR, "model.onnx"),
-    sess_options=sess_opts,
-    providers=["CPUExecutionProvider"]
+    providers=["CPUExecutionProvider"],
+    sess_options=sess_opts
 )
 
 print("✔ ONNX model loaded")
@@ -70,23 +75,21 @@ print("✔ ONNX model loaded")
 # CLEAN TEXT
 # ---------------------------
 def clean_text(t):
-    t = re.sub(r"\s+", " ", t or "")
-    return t.strip()
+    return re.sub(r"\s+", " ", t or "").strip()
 
 
 # ---------------------------
-# GENERATE SUMMARY USING BART ONNX
+# GENERATE SUMMARY
 # ---------------------------
 def generate_summary(text, max_len=150):
     inputs = tokenizer(
         text,
         return_tensors="np",
-        truncation=True,
         padding="max_length",
+        truncation=True,
         max_length=512
     )
 
-    # Run ONNX model
     outputs = session.run(
         None,
         {
@@ -96,12 +99,12 @@ def generate_summary(text, max_len=150):
     )
 
     summary_ids = outputs[0]
-    summary = tokenizer.batch_decode(summary_ids, skip_special_tokens=True)[0]
+    summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
     return summary
 
 
 # ---------------------------
-# CHUNKING FOR LONG TEXTS
+# CHUNK LONG TEXT
 # ---------------------------
 CHUNK_SIZE = 1500
 
@@ -117,31 +120,26 @@ def summarize_text(text, length):
 
     text = clean_text(text)
 
-    # If short → direct summarization
     if len(text) <= CHUNK_SIZE:
-        return generate_summary(text, max_len=LENGTH_MAP[length])
+        return generate_summary(text, LENGTH_MAP[length])
 
-    # Long text → chunking
-    chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
-    partial_summaries = []
+    chunks = [text[i:i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+    partials = []
 
     for i, chunk in enumerate(chunks):
         print(f"📦 Chunk {i+1}/{len(chunks)}")
-        part = generate_summary(chunk, max_len=120)
-        partial_summaries.append(part)
+        partials.append(generate_summary(chunk, 120))
         time.sleep(0.05)
 
-    combined_text = " ".join(partial_summaries)
-
-    # Final summary from all partial ones
-    return generate_summary(combined_text, max_len=LENGTH_MAP[length])
+    combined = " ".join(partials)
+    return generate_summary(combined, LENGTH_MAP[length])
 
 
 # ---------------------------
 # GRADIO UI
 # ---------------------------
 with gr.Blocks(title="📄 BART ONNX Summarizer") as app:
-    gr.Markdown("## 📄 BART ONNX Document Summarizer")
+    gr.Markdown("## 📄 BART ONNX Summarizer")
     gr.Markdown("Paste your text below and click **Summarize**.")
 
     input_box = gr.Textbox(lines=12, label="Paste text")
@@ -157,7 +155,7 @@ with gr.Blocks(title="📄 BART ONNX Summarizer") as app:
 
 
 # ---------------------------
-# LAUNCH (Render)
+# LAUNCH
 # ---------------------------
 if __name__ == "__main__":
     app.launch(
