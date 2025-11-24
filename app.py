@@ -1,8 +1,5 @@
 import os
-import requests
 import gradio as gr
-import pdfplumber
-import io
 import re
 import numpy as np
 import onnxruntime as ort
@@ -18,62 +15,18 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ---------------------------
-# DOWNLOAD UTILS
-# ---------------------------
-def download_file(url, dest):
-    for attempt in range(3):
-        try:
-            print(f"📥 Downloading {os.path.basename(dest)}...")
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-
-            with open(dest, "wb") as f:
-                for chunk in response.iter_content(8192):
-                    f.write(chunk)
-
-            print(f"✅ Downloaded {os.path.basename(dest)}")
-            return True
-        except Exception as e:
-            print(f"❌ Download failed: {e}")
-            time.sleep(2)
-    return False
-
-
-def download_models():
-    files = {
-        "encoder.onnx": f"https://huggingface.co/{MODEL_REPO}/resolve/main/encoder.onnx",
-        "decoder.onnx": f"https://huggingface.co/{MODEL_REPO}/resolve/main/decoder.onnx",
-    }
-
-    for name, url in files.items():
-        path = os.path.join(MODEL_DIR, name)
-        if not os.path.exists(path):
-            if not download_file(url, path):
-                raise Exception(f"Failed to download {name}")
-        else:
-            print(f"✅ {name} exists")
-
-
-# ---------------------------
 # LOAD MODELS
 # ---------------------------
 print("🔧 Initializing models...")
 
 try:
-    download_models()
-
     print("🔹 Loading tokenizer...")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_REPO,
-            use_fast=False,
-            trust_remote_code=True
-        )
-        print("✅ Tokenizer loaded with use_fast=False")
-    except Exception:
-        from transformers import T5Tokenizer
-        tokenizer = T5Tokenizer.from_pretrained(MODEL_REPO)
-        print("✅ Tokenizer loaded with fallback")
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_REPO,
+        use_fast=False,
+        trust_remote_code=True
+    )
+    print("✅ Tokenizer loaded")
 
     print("🔹 Loading ONNX sessions...")
     enc_sess = ort.InferenceSession(
@@ -88,78 +41,11 @@ try:
     PAD = tokenizer.pad_token_id or 0
     EOS = tokenizer.eos_token_id
 
-    print("✅ ONNX models loaded")
+    print("✅ ONNX models ready")
 
 except Exception as e:
     print("❌ Model load error:", e)
     raise
-
-
-# ---------------------------
-# FIXED EXTRACT TEXT FOR GRADIO 4.19 + RENDER
-# ---------------------------
-def extract_text(file):
-    """
-    Works for:
-    ✔ FileData object
-    ✔ dict
-    ✔ list-wrapped FileData
-    ✔ local temporary paths
-    """
-
-    # unwrap lists automatically
-    if isinstance(file, list) and len(file) > 0:
-        file = file[0]
-
-    if file is None:
-        print("❌ No file received")
-        return None
-
-    print("🔍 File received:", file)
-
-    # Resolve filename
-    if hasattr(file, "orig_name"):
-        filename = file.orig_name.lower()
-    elif isinstance(file, dict) and "name" in file:
-        filename = file["name"].lower()
-    else:
-        filename = "unknown"
-
-    # Extract raw bytes
-    if hasattr(file, "data") and file.data:
-        file_bytes = file.data
-    elif isinstance(file, dict) and "data" in file:
-        file_bytes = file["data"]
-    elif hasattr(file, "path"):
-        with open(file.path, "rb") as f:
-            file_bytes = f.read()
-    else:
-        print("❌ Could not read bytes")
-        return None
-
-    # TXT handling
-    if filename.endswith(".txt"):
-        text = file_bytes.decode("utf-8", errors="ignore")
-        print(f"✅ TXT extracted: {len(text)} characters")
-        return text
-
-    # PDF handling
-    if filename.endswith(".pdf"):
-        try:
-            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-                pages = [p.extract_text() or "" for p in pdf.pages]
-            text = "\n".join(pages).strip()
-            if text:
-                print(f"📄 PDF extracted: {len(text)} characters")
-            else:
-                print("❌ No text in PDF (scanned?)")
-            return text
-        except Exception as e:
-            print("❌ PDF extraction failed:", e)
-            return None
-
-    print("❌ Unsupported file type:", filename)
-    return None
 
 
 # ---------------------------
@@ -218,20 +104,14 @@ LENGTH = {
 }
 
 
-def summarize_document(file, length):
-    print("🔥 summarize_document triggered")
-    text = extract_text(file)
+def summarize_text(input_text, length):
+    if not input_text or len(input_text.strip()) == 0:
+        return "❌ Please paste some text."
 
-    if not text:
-        return ("❌ Unable to extract text. Please ensure:\n"
-                "• File is not empty\n"
-                "• For PDFs: Contains selectable text\n"
-                "• File is not corrupted\n")
-
-    print(f"📝 Extracted {len(text)} characters")
-
-    text = clean_text(text)
+    text = clean_text(input_text)
     max_len = LENGTH[length]
+
+    print(f"📝 Received text of {len(text)} characters")
 
     if len(text) > 1200:
         chunks = [text[i:i+900] for i in range(0, len(text), 900)]
@@ -243,21 +123,17 @@ def summarize_document(file, length):
 
 
 # ---------------------------
-# GRADIO UI (FIXED BUTTON)
+# GRADIO UI (TEXT ONLY — NO FILE UPLOAD)
 # ---------------------------
-def handle_click(file, length):
-    # unwrap list if Gradio sends [File]
-    if isinstance(file, list) and len(file) > 0:
-        file = file[0]
-    return summarize_document(file, length)
+with gr.Blocks(title="📄 Tiny T5 ONNX Text Summarizer") as app:
+    gr.Markdown("## 📄 Tiny T5 ONNX Text Summarizer")
+    gr.Markdown("Paste your text below and generate a summary")
 
-
-with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
-    gr.Markdown("## 📄 Tiny T5 ONNX Document Summarizer")
-    gr.Markdown("Upload a PDF or TXT file to generate a summary")
-
-    file_input = gr.File(label="Upload PDF or TXT",
-                         file_types=[".pdf", ".txt"])
+    input_text = gr.Textbox(
+        label="Paste Text",
+        placeholder="Paste or type your text here...",
+        lines=12
+    )
 
     length_input = gr.Dropdown(
         ["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
@@ -268,7 +144,7 @@ with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
     output = gr.Textbox(label="Summary", lines=10)
 
     btn = gr.Button("Summarize")
-    btn.click(fn=handle_click, inputs=[file_input, length_input], outputs=output)
+    btn.click(fn=summarize_text, inputs=[input_text, length_input], outputs=output)
 
 
 # ---------------------------
