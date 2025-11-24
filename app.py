@@ -1,4 +1,3 @@
-# app.py — Fixed for Render deployment
 import os
 import requests
 import gradio as gr
@@ -12,243 +11,200 @@ import time
 
 print("🚀 Starting application...")
 
-# ---------------------------
-# CONFIG
-# ---------------------------
 MODEL_REPO = "Satvi/tiny_t5"
 MODEL_DIR = "onnx_model"
 os.makedirs(MODEL_DIR, exist_ok=True)
+
 
 # ---------------------------
 # DOWNLOAD UTILS
 # ---------------------------
 def download_file(url, dest):
-    """Download file with retry logic"""
     for attempt in range(3):
         try:
-            print(f"📥 Downloading {os.path.basename(dest)} (attempt {attempt + 1})...")
+            print(f"📥 Downloading {os.path.basename(dest)}...")
             response = requests.get(url, stream=True, timeout=30)
             response.raise_for_status()
-            
-            with open(dest, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
+
+            with open(dest, "wb") as f:
+                for chunk in response.iter_content(8192):
                     f.write(chunk)
+
             print(f"✅ Downloaded {os.path.basename(dest)}")
             return True
         except Exception as e:
-            print(f"❌ Attempt {attempt + 1} failed: {e}")
+            print(f"❌ Download failed: {e}")
             time.sleep(2)
     return False
 
+
 def download_models():
-    """Download ONNX models if they don't exist"""
     files = {
         "encoder.onnx": f"https://huggingface.co/{MODEL_REPO}/resolve/main/encoder.onnx",
         "decoder.onnx": f"https://huggingface.co/{MODEL_REPO}/resolve/main/decoder.onnx",
     }
-    
-    for filename, url in files.items():
-        dest_path = os.path.join(MODEL_DIR, filename)
-        if not os.path.exists(dest_path):
-            success = download_file(url, dest_path)
-            if not success:
-                raise Exception(f"Failed to download {filename}")
+
+    for name, url in files.items():
+        path = os.path.join(MODEL_DIR, name)
+        if not os.path.exists(path):
+            if not download_file(url, path):
+                raise Exception(f"Failed to download {name}")
         else:
-            print(f"✅ {filename} already exists")
+            print(f"✅ {name} exists")
+
 
 # ---------------------------
-# MODEL LOADING
+# LOAD MODELS
 # ---------------------------
 print("🔧 Initializing models...")
 
 try:
-    # Download models first
     download_models()
-    
-    # Load tokenizer
-    print("🔹 Loading tokenizer...")
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO)
-    
-    # Load ONNX sessions
+
     print("🔹 Loading ONNX sessions...")
     enc_sess = ort.InferenceSession(
         os.path.join(MODEL_DIR, "encoder.onnx"),
-        providers=['CPUExecutionProvider']
+        providers=["CPUExecutionProvider"]
     )
     dec_sess = ort.InferenceSession(
-        os.path.join(MODEL_DIR, "decoder.onnx"), 
-        providers=['CPUExecutionProvider']
+        os.path.join(MODEL_DIR, "decoder.onnx"),
+        providers=["CPUExecutionProvider"]
     )
-    
-    PAD_ID = tokenizer.pad_token_id or 0
-    EOS_ID = tokenizer.eos_token_id
-    
-    print("✅ All models loaded successfully!")
-    
+
+    PAD = tokenizer.pad_token_id or 0
+    EOS = tokenizer.eos_token_id
+
+    print("✅ ONNX models loaded")
+
 except Exception as e:
-    print(f"❌ Model loading failed: {e}")
-    raise e
+    print("❌ Model load error:", e)
+    raise
+
 
 # ---------------------------
-# TEXT PROCESSING
+# TEXT EXTRACT
 # ---------------------------
-def clean_text(text):
-    """Clean and normalize text"""
-    if not text:
-        return ""
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
 def extract_text(file_obj):
-    """Extract text from PDF or TXT file"""
     try:
-        if file_obj.name.endswith('.txt'):
-            return file_obj.read().decode('utf-8', errors='ignore')
-        
-        elif file_obj.name.endswith('.pdf'):
+        if file_obj.name.endswith(".txt"):
+            return file_obj.read().decode("utf-8", errors="ignore")
+
+        if file_obj.name.endswith(".pdf"):
             text = ""
             with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
                 for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + " "
+                    t = page.extract_text()
+                    if t:
+                        text += t + " "
             return text
-            
-    except Exception as e:
-        print(f"❌ Text extraction error: {e}")
-    
-    return None
+    except:
+        return None
+
+
+# ---------------------------
+# TEXT CLEANING
+# ---------------------------
+def clean_text(t):
+    return re.sub(r"\s+", " ", t or "").strip()
+
 
 # ---------------------------
 # SUMMARIZATION
 # ---------------------------
 def tiny_generate(text, max_len=120):
-    """Generate summary using ONNX model"""
     try:
         prompt = "summarize: " + text
-        tokens = tokenizer(prompt, return_tensors="np", truncation=True, max_length=512)
+
+        tokens = tokenizer(prompt, return_tensors="np",
+                           truncation=True, max_length=512)
         input_ids = tokens["input_ids"].astype(np.int64)
 
-        # Encoder forward pass
-        enc_output = enc_sess.run(None, {"input_ids": input_ids})[0]
+        enc_out = enc_sess.run(None, {"input_ids": input_ids})[0]
 
-        # Decoder generation loop
-        dec_ids = np.array([[PAD_ID]], dtype=np.int64)
-        generated_tokens = []
+        dec_ids = np.array([[PAD]], dtype=np.int64)
+        generated = []
 
         for _ in range(max_len):
             logits = dec_sess.run(None, {
-                "decoder_input_ids": dec_ids,
-                "encoder_hidden_states": enc_output
+                "input_ids": dec_ids,                 # ✔ FIXED NAME
+                "encoder_hidden_states": enc_out
             })[0]
 
-            next_token = np.argmax(logits[:, -1, :], axis=-1).reshape(1, 1).astype(np.int64)
-            dec_ids = np.concatenate([dec_ids, next_token], axis=1)
+            next_tok = int(np.argmax(logits[:, -1, :]))
 
-            token_id = int(next_token[0, 0])
-            if token_id == EOS_ID:
+            if next_tok == EOS:
                 break
-            generated_tokens.append(token_id)
 
-        return tokenizer.decode(generated_tokens, skip_special_tokens=True)
-    
+            generated.append(next_tok)
+            dec_ids = np.concatenate(
+                [dec_ids, np.array([[next_tok]], dtype=np.int64)], axis=1
+            )
+
+        return tokenizer.decode(generated, skip_special_tokens=True)
+
     except Exception as e:
-        print(f"❌ Generation error: {e}")
-        return f"❌ Error during summarization: {str(e)}"
+        print("❌ Generation error:", e)
+        return f"Error: {e}"
+
 
 # ---------------------------
-# MAIN FUNCTION
+# MAIN SUMMARIZER
 # ---------------------------
-LENGTH_MAP = {
+LENGTH = {
     "Short (100 words)": 120,
-    "Medium (250 words)": 250, 
-    "Long (500 words)": 350,
+    "Medium (250 words)": 250,
+    "Long (500 words)": 350
 }
 
+
 def summarize_document(file, length):
-    """Main summarization function"""
-    if file is None:
-        return "❌ Please upload a file."
-    
-    raw_text = extract_text(file)
-    if not raw_text:
-        return "❌ Could not extract text. The PDF may be image-based or corrupted."
-    
-    raw_text = clean_text(raw_text)
-    max_len = LENGTH_MAP[length]
-    
-    # For very long documents, chunk them
-    if len(raw_text) > 1000:
-        chunks = [raw_text[i:i+800] for i in range(0, len(raw_text), 800)]
-        chunk_summaries = []
-        
-        for chunk in chunks:
-            if len(chunk) > 50:  # Only summarize substantial chunks
-                summary = tiny_generate(chunk, max_len=80)
-                chunk_summaries.append(summary)
-        
-        if chunk_summaries:
-            combined = " ".join(chunk_summaries)
-            final_summary = tiny_generate(combined, max_len=max_len)
-        else:
-            final_summary = tiny_generate(raw_text[:1000], max_len=max_len)
+    if not file:
+        return "❌ Please upload a file"
+
+    text = extract_text(file)
+    if not text:
+        return "❌ Unable to extract text"
+
+    text = clean_text(text)
+    max_len = LENGTH[length]
+
+    if len(text) > 1200:
+        chunks = [text[i:i+900] for i in range(0, len(text), 900)]
+        parts = [tiny_generate(ch, 80) for ch in chunks]
+        combined = " ".join(parts)
+        return tiny_generate(combined, max_len)
     else:
-        final_summary = tiny_generate(raw_text, max_len=max_len)
-    
-    return final_summary
+        return tiny_generate(text, max_len)
+
 
 # ---------------------------
-# GRADIO UI WITH BLOCKS (FIXES THE SCHEMA ERROR)
+# GRADIO UI
 # ---------------------------
 with gr.Blocks(title="📄 Tiny T5 ONNX Document Summarizer") as app:
-    gr.Markdown("# 📄 Tiny T5 ONNX Document Summarizer")
-    gr.Markdown("Upload a PDF or TXT file to generate an AI-powered summary")
-    
-    with gr.Row():
-        with gr.Column():
-            file_input = gr.File(
-                label="Upload Document",
-                file_types=[".pdf", ".txt"],
-                type="filepath"
-            )
-            length_dropdown = gr.Dropdown(
-                choices=["Short (100 words)", "Medium (250 words)", "Long (500 words)"],
-                value="Medium (250 words)",
-                label="Summary Length"
-            )
-            submit_btn = gr.Button("Generate Summary", variant="primary")
-        
-        with gr.Column():
-            output_text = gr.Textbox(
-                label="Generated Summary",
-                lines=8,
-                max_lines=12,
-                placeholder="Your summary will appear here..."
-            )
-    
-    # Examples
-    gr.Examples(
-        examples=[],
-        inputs=[file_input],
-        label="Example Documents (add your own files here)"
+    gr.Markdown("## 📄 Tiny T5 ONNX Document Summarizer")
+
+    file_input = gr.File(label="Upload PDF or TXT",
+                         file_types=[".pdf", ".txt"])
+    length_input = gr.Dropdown(
+        ["Short (100 words)", "Medium (250 words)",
+            "Long (500 words)"],
+        value="Medium (250 words)"
     )
-    
-    # Connect the button
-    submit_btn.click(
-        fn=summarize_document,
-        inputs=[file_input, length_dropdown],
-        outputs=output_text
-    )
+    output = gr.Textbox(label="Summary", lines=10)
+
+    btn = gr.Button("Summarize")
+    btn.click(summarize_document, [file_input, length_input], output)
+
 
 # ---------------------------
-# LAUNCH APP (CRITICAL FIX)
+# RENDER FIX → LAUNCH SERVER
 # ---------------------------
 if __name__ == "__main__":
-    # This is the key fix for Render
     app.launch(
         server_name="0.0.0.0",
         server_port=10000,
-        share=False,  # Must be False for Render
-        show_error=True,
-        quiet=True  # Reduces verbose logging
+        share=False,
+        quiet=False
     )
